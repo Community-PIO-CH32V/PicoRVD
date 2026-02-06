@@ -6,19 +6,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout PicoRVD
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
         with:
           path: PicoRVD
 
-      - name: Checkout pico-sdk/1.5.1
-        uses: actions/checkout@v3
+      - name: Checkout pico-sdk/2.2.0
+        uses: actions/checkout@v6
         with:
           repository: raspberrypi/pico-sdk
-          ref: 1.5.1
+          ref: 2.2.0
           path: pico-sdk
 
       - name: Checkout pico-sdk submodules
@@ -29,21 +29,70 @@ jobs:
         if: ${{ matrix.os == 'windows-latest' }}
         working-directory: ${{github.workspace}}/PicoRVD
         run: choco install .github/workflows/choco_packages.config
+       
+      - name: Download and setup libusb
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: bash
+        run: |
+          echo "Downloading libusb..."
+          curl -L https://github.com/libusb/libusb/releases/download/v1.0.29/libusb-1.0.29.7z -o libusb.7z
+          echo "Extracting libusb..."
+          7z x libusb.7z -oC:/libusb -y
+          echo "Checking libusb structure..."
+          ls -la C:/libusb/
+          ls -la C:/libusb/MinGW64/static/ || true
+          ls -la C:/libusb/MinGW64/dll/ || true 
+          echo "Cloning picotool..."
+          git clone https://github.com/raspberrypi/picotool.git --branch 2.2.0 --depth 1 C:/picotool-src
+          
+          echo "Building picotool with libusb support..."
+          mkdir -p C:/picotool-src/build
+          cd C:/picotool-src/build
+          
+          # Use the correct x86_64 MinGW64 paths (not ARM64!)
+          cmake -G "Ninja" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_SDK_PATH="${{github.workspace}}/pico-sdk" \
+            -DLIBUSB_LIBRARIES="C:/libusb/MinGW64/static/libusb-1.0.dll.a" \
+            -DLIBUSB_INCLUDE_DIR="C:/libusb/include" \
+            ..
+            
+          # Build
+          ninja
+          
+          # Verify picotool was built
+          if [ ! -f "picotool.exe" ]; then
+            echo "ERROR: picotool.exe was not built!"
+            exit 1
+          fi
+          
+          # Create deployment directory
+          mkdir -p C:/picotool-bin
+          
+          # Copy picotool executable and required DLL (x86_64 version!)
+          cp picotool.exe C:/picotool-bin/
+          cp C:/libusb/MinGW64/dll/libusb-1.0.dll C:/picotool-bin/
+          
+          # Add to PATH for subsequent steps
+          echo "C:/picotool-bin" >> $GITHUB_PATH
+
+          echo "Testing binary"
+          ./picotool.exe --version || true
 
       - name: Install dependencies (Linux)
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: sudo apt-get update && sudo apt-get install -y build-essential git cmake gcc-arm-none-eabi gcc-riscv64-unknown-elf
 
       - name: Install dependencies (Mac)
-        if: ${{ matrix.os == 'macos-14' }}
+        if: ${{ matrix.os == 'macos-15' }}
         run: |
-          brew install cmake make
+          brew install make
           brew install gcc-arm-embedded
           brew tap riscv-software-src/riscv
           brew install riscv-tools
 
       - name: Build Project (CH32V003 Blinky)
-        if: ${{ matrix.os == 'ubuntu-latest' || matrix.os == 'macos-14' }}
+        if: ${{ matrix.os == 'ubuntu-latest' || matrix.os == 'macos-15' }}
         working-directory: ${{github.workspace}}/PicoRVD
         shell: bash
         run: |
@@ -57,15 +106,17 @@ jobs:
         run: |
           mkdir bin
           INCLUDE_BIN=ON
+          PICOTOOL_OPTION=
           if [ "$RUNNER_OS" == "Windows" ]; then
               INCLUDE_BIN=OFF
+              PICOTOOL_OPTION=-DPICOTOOL_FETCH_FROM_GIT_PATH=C:/picotool-bin/
           fi
-          cmake -B bin -G "Unix Makefiles" -DPICO_SDK_PATH=../pico-sdk -DCMAKE_VERBOSE_MAKEFILE:BOOL=ON -DINCLUDE_BLINKY_BINARY:BOOL=$INCLUDE_BIN -DCMAKE_BUILD_TYPE=Release -DPICO_BOARD=pico
+          cmake -B bin -G "Unix Makefiles" -DPICO_SDK_PATH=../pico-sdk -DCMAKE_VERBOSE_MAKEFILE:BOOL=ON $PICOTOOL_OPTION -DINCLUDE_BLINKY_BINARY:BOOL=$INCLUDE_BIN -DCMAKE_BUILD_TYPE=Release -DPICO_BOARD=pico
           make -j8 -C bin
 
       - name: Upload UF2 File
         if: ${{ matrix.os == 'ubuntu-latest' }}
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v6
         with:
           name: PicoRVD.uf2
           path: ${{github.workspace}}/PicoRVD/bin/picorvd.uf2
